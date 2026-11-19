@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HUSKY: '0'
+  NEXT_TELEMETRY_DISABLED: '1'
+
+# Actions are pinned to full commit SHAs (the comment keeps the human-readable version);
+# Dependabot's github-actions ecosystem bumps both. `ubuntu-latest` is mid-migration from
+# 24.04 to 26.04, so the image is pinned explicitly.
+jobs:
+  quality:
+    name: Lint, types, unit tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Dependabot security alerts cannot read a pnpm 12 lockfile that pins its own version
+      # (two YAML documents), so this audit is the vulnerability gate (docs/DECISIONES.md, D-021).
+      - run: pnpm audit --prod --audit-level=high
+
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  e2e:
+    name: E2E, accessibility and screenshots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+
+      # Builds and serves the production bundle (see webServer in playwright.config.ts).
+      - run: pnpm test:e2e
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-artifacts
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  supabase:
+    name: Supabase local stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: supabase/setup-cli@689adcfb80d947100a1eab127289b97d1fb07b13 # v3.2.0
+        with:
+          version: 3.2.0
+
+      # Phase 0 only proves that config.toml, migrations and seed apply on a clean database.
+      # Later phases add generated-types and RLS checks here.
+      - run: supabase start -x studio,mailpit,imgproxy,vector,supavisor,postgres-meta
+      - run: supabase db reset
+
+      - run: supabase stop --no-backup
+        if: ${{ always() }}
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # GitHub's native secret scanning is not available for private personal repositories
+      # (docs/DECISIONES.md, D-014), so this is the check that replaces it.
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The only status that branch protection needs to require: later phases add jobs above
+  # without touching the repository rules.
+  ci-ok:
+    name: CI OK
+    runs-on: ubuntu-24.04
+    if: ${{ always() }}
+    needs: [quality, e2e, supabase, secrets]
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
