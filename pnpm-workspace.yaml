@@ -1,0 +1,5 @@
+# pnpm 12: install scripts of dependencies are blocked unless allowed here.
+# `false` = deliberately skipped (prebuilt binaries ship as optional dependencies).
+allowBuilds:
+  sharp: false
+  unrs-resolver: false

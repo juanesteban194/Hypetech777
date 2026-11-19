@@ -1,0 +1,3 @@
+-- Seed data for local development and CI (docs/PROMPT_MAESTRO.md §13).
+-- Phase 2 adds roughly 60 realistic products, 2 pre-orders, 6 sourcing requests and 4 orders.
+-- Images are generated locally; nothing is ever downloaded from the internet.
